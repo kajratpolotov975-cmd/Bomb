@@ -1,0 +1,347 @@
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+
+-- Удаляем старый GUI
+if player.PlayerGui:FindFirstChild("RickPrimeBombGUI") then
+    player.PlayerGui.RickPrimeBombGUI:Destroy()
+end
+
+-- Создаем интерфейс
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "RickPrimeBombGUI"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = player.PlayerGui
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 220, 0, 110)
+mainFrame.Position = UDim2.new(0.05, 0, 0.1, 0)
+mainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Draggable = true
+mainFrame.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 12)
+corner.Parent = mainFrame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 35)
+title.BackgroundTransparency = 1
+title.Text = "⚡ Rick Prime Bomb"
+title.TextColor3 = Color3.fromRGB(200, 0, 255)
+title.TextSize = 16
+title.Font = Enum.Font.GothamBold
+title.Parent = mainFrame
+
+local spawnButton = Instance.new("TextButton")
+spawnButton.Size = UDim2.new(0.85, 0, 0, 45)
+spawnButton.Position = UDim2.new(0.075, 0, 0.45, 0)
+spawnButton.BackgroundColor3 = Color3.fromRGB(100, 10, 180)
+spawnButton.Text = "Взять бомбу"
+spawnButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+spawnButton.TextSize = 15
+spawnButton.Font = Enum.Font.GothamSemibold
+spawnButton.Parent = mainFrame
+
+local btnCorner = Instance.new("UICorner")
+btnCorner.CornerRadius = UDim.new(0, 8)
+btnCorner.Parent = spawnButton
+
+-- Функция создания бомбы Рика Прайма
+local function createBombModel()
+    local tool = Instance.new("Tool")
+    tool.Name = "RickPrimeBomb"
+    tool.RequiresHandle = true
+    tool.CanBeDropped = false
+
+    local handle = Instance.new("Part")
+    handle.Name = "Handle"
+    handle.Size = Vector3.new(1.4, 1.4, 1.4)
+    handle.Shape = Enum.PartType.Ball
+    handle.Material = Enum.Material.Metal
+    handle.Color = Color3.fromRGB(35, 35, 42)
+    handle.Parent = tool
+
+    local core = Instance.new("Part")
+    core.Size = Vector3.new(0.9, 0.9, 0.9)
+    core.Shape = Enum.PartType.Ball
+    core.Material = Enum.Material.Neon
+    core.Color = Color3.fromRGB(50, 255, 50)
+    core.Parent = tool
+
+    local coreWeld = Instance.new("WeldConstraint")
+    coreWeld.Part0 = handle
+    coreWeld.Part1 = core
+    coreWeld.Parent = handle
+
+    for i = 1, 2 do
+        local ring = Instance.new("Part")
+        ring.Size = Vector3.new(1.5, 0.12, 1.5)
+        ring.Shape = Enum.PartType.Cylinder
+        ring.Material = Enum.Material.Neon
+        ring.Color = Color3.fromRGB(180, 0, 255)
+        ring.Parent = tool
+
+        if i == 1 then
+            ring.CFrame = handle.CFrame * CFrame.Angles(math.rad(90), 0, 0)
+        else
+            ring.CFrame = handle.CFrame * CFrame.Angles(0, 0, math.rad(90))
+        end
+
+        local ringWeld = Instance.new("WeldConstraint")
+        ringWeld.Part0 = handle
+        ringWeld.Part1 = ring
+        ringWeld.Parent = handle
+    end
+
+    local directions = {
+        Vector3.new(1,0,0), Vector3.new(-1,0,0),
+        Vector3.new(0,1,0), Vector3.new(0,-1,0),
+        Vector3.new(0,0,1), Vector3.new(0,0,-1),
+        Vector3.new(0.7,0.7,0), Vector3.new(-0.7,-0.7,0),
+        Vector3.new(0.7,-0.7,0), Vector3.new(-0.7,0.7,0),
+        Vector3.new(0,0.7,0.7), Vector3.new(0,-0.7,-0.7)
+    }
+
+    for _, dir in ipairs(directions) do
+        local spike = Instance.new("Part")
+        spike.Size = Vector3.new(0.22, 0.35, 0.22)
+        spike.Shape = Enum.PartType.Cylinder
+        spike.Material = Enum.Material.SmoothPlastic
+        spike.Color = Color3.fromRGB(50, 50, 60)
+        
+        local neonTip = Instance.new("Part")
+        neonTip.Size = Vector3.new(0.15, 0.15, 0.15)
+        neonTip.Shape = Enum.PartType.Ball
+        neonTip.Material = Enum.Material.Neon
+        neonTip.Color = Color3.fromRGB(200, 0, 255)
+        
+        local pos = handle.Position + (dir * 0.7)
+        spike.CFrame = CFrame.new(pos, handle.Position)
+        neonTip.CFrame = spike.CFrame + (spike.CFrame.LookVector * -0.15)
+
+        spike.Parent = tool
+        neonTip.Parent = tool
+
+        local w1 = Instance.new("WeldConstraint")
+        w1.Part0 = handle
+        w1.Part1 = spike
+        w1.Parent = handle
+
+        local w2 = Instance.new("WeldConstraint")
+        w2.Part0 = handle
+        w2.Part1 = neonTip
+        w2.Parent = handle
+    end
+
+    tool.Activated:Connect(function()
+        local char = player.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+        
+        tool.Parent = nil
+
+        local thrownBomb = handle:Clone()
+        thrownBomb.CanCollide = true
+        thrownBomb.Massless = false
+        
+        -- ОЧЕНЬ ВАЖНО: Максимальное трение (friction = 3.0) и нулевая упругость (elasticity = 0),
+        -- чтобы бомба втыкалась в землю и сразу останавливалась, не катясь как шар для боулинга.
+        thrownBomb.CustomPhysicalProperties = PhysicalProperties.new(3.0, 0.05, 0.3, 1, 1)
+        thrownBomb.Parent = workspace
+
+        local hrp = char.HumanoidRootPart
+        local camera = workspace.CurrentCamera
+        
+        thrownBomb.CFrame = hrp.CFrame + (camera.CFrame.LookVector * 2.5) + Vector3.new(0, 2, 0)
+
+        local attachedParts = {thrownBomb}
+        for _, child in ipairs(tool:GetChildren()) do
+            if child ~= handle and child:IsA("BasePart") then
+                local cloneChild = child:Clone()
+                cloneChild.CanCollide = false
+                cloneChild.Parent = workspace
+                cloneChild.CFrame = thrownBomb.CFrame * handle.CFrame:ToObjectSpace(child.CFrame)
+                
+                local w = Instance.new("WeldConstraint")
+                w.Part0 = thrownBomb
+                w.Part1 = cloneChild
+                w.Parent = thrownBomb
+                table.insert(attachedParts, cloneChild)
+            end
+        end
+        
+        -- Высокий и далекий бросок
+        local targetPos = mouse.Hit.Position
+        local direction = (targetPos - thrownBomb.Position).Unit
+        local throwSpeed = 95
+        thrownBomb.Velocity = (direction * throwSpeed) + Vector3.new(0, 55, 0)
+        thrownBomb.RotVelocity = Vector3.new(math.random(-15, 15), math.random(-15, 15), math.random(-15, 15))
+
+        -- Как только коснется земли — резко гасим горизонтальную скорость, чтобы не катилась
+        local connection
+        connection = thrownChildTouched or thrownBomb.Touched:Connect(function(hit)
+            if hit and not hit:IsDescendantOf(char) then
+                -- При столкновении с землей быстро убираем горизонтальную инерцию качения
+                local currentVel = thrownBomb.Velocity
+                thrownBomb.Velocity = Vector3.new(currentVel.X * 0.1, currentVel.Y, currentVel.Z * 0.1)
+                if connection then
+                    connection:Disconnect()
+                end
+            end
+        end)
+
+        -- Звук тиканья C4
+        task.spawn(function()
+            for i = 1, 8 do
+                if not thrownBomb or not thrownBomb.Parent then break end
+                
+                local beep = Instance.new("Sound")
+                beep.SoundId = "rbxassetid://104560954"
+                beep.Volume = 2.5
+                beep.Pitch = 1.0
+                beep.Parent = thrownBomb
+                beep:Play()
+                
+                task.delay(0.2, function()
+                    if beep then beep:Destroy() end
+                end)
+                
+                task.wait(0.25)
+            end
+        end)
+
+        -- Жесткий таймер взрыва ровно через 2 секунды
+        task.delay(2, function()
+            if not thrownBomb then return end
+            if connection then connection:Disconnect() end
+            
+            local pos = thrownBomb.Position
+            local killRadius = 45
+
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+                    local targetHrp = p.Character.HumanoidRootPart
+                    local hum = p.Character.Humanoid
+                    
+                    if (targetHrp.Position - pos).Magnitude <= killRadius then
+                        if hum then hum.Health = 0 end
+                        p.Character:BreakJoints()
+                        
+                        for _, part in ipairs(p.Character:GetChildren()) do
+                            if part:IsA("BasePart") then
+                                part.CanCollide = true
+                                local forceDir = (part.Position - pos).Unit
+                                part.Velocity = (forceDir * math.random(70, 110)) + Vector3.new(0, math.random(50, 80), 0)
+                            end
+                        end
+                    end
+                end
+            end
+
+            local explosion = Instance.new("Explosion")
+            explosion.Position = pos
+            explosion.BlastRadius = killRadius
+            explosion.BlastPressure = 800000
+            explosion.DestroyJointRadiusPercent = 0.2
+            explosion.Parent = workspace
+
+            local explosionSound = Instance.new("Sound")
+            explosionSound.SoundId = "rbxassetid://6290067239"
+            explosionSound.Volume = 8
+            explosionSound.Parent = workspace
+            explosionSound:Play()
+            task.delay(4, function() explosionSound:Destroy() end)
+
+            for _, part in ipairs(attachedParts) do
+                if part and part.Parent then part:Destroy() end
+            end
+
+            -- Визуальные эффекты взрыва
+            local coreFlash = Instance.new("Part")
+            coreFlash.Shape = Enum.PartType.Ball
+            coreFlash.Size = Vector3.new(4, 4, 4)
+            coreFlash.Position = pos
+            coreFlash.Anchored = true
+            coreFlash.CanCollide = false
+            coreFlash.Material = Enum.Material.Neon
+            coreFlash.Color = Color3.fromRGB(255, 255, 255)
+            coreFlash.Parent = workspace
+
+            TweenService:Create(coreFlash, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+                Size = Vector3.new(50, 50, 50),
+                Transparency = 1
+            }):Play()
+
+            local shades = {
+                Color3.fromRGB(180, 0, 255),
+                Color3.fromRGB(220, 20, 160),
+                Color3.fromRGB(130, 0, 200),
+                Color3.fromRGB(255, 80, 220)
+            }
+
+            for i = 1, 10 do
+                task.spawn(function()
+                    local cloud = Instance.new("Part")
+                    cloud.Shape = Enum.PartType.Ball
+                    cloud.Size = Vector3.new(6, 6, 6)
+                    cloud.Position = pos + Vector3.new(math.random(-12, 12), math.random(0, 5), math.random(-12, 12))
+                    cloud.Anchored = true
+                    cloud.CanCollide = false
+                    cloud.Material = Enum.Material.Neon
+                    cloud.Color = shades[math.random(1, #shades)]
+                    cloud.Transparency = 0.15
+                    cloud.Parent = workspace
+
+                    TweenService:Create(cloud, TweenInfo.new(1.0, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+                        Size = Vector3.new(math.random(70, 95), math.random(70, 95), math.random(70, 95)),
+                        Transparency = 1,
+                        Position = cloud.Position + Vector3.new(math.random(-6, 6), math.random(30, 50), math.random(-6, 6))
+                    }):Play()
+
+                    task.delay(1.1, function() cloud:Destroy() end)
+                end)
+            end
+
+            for i = 1, 6 do
+                task.spawn(function()
+                    local smoke = Instance.new("Part")
+                    smoke.Shape = Enum.PartType.Ball
+                    smoke.Size = Vector3.new(12, 12, 12)
+                    smoke.Position = pos + Vector3.new(math.random(-10, 10), 2, math.random(-10, 10))
+                    smoke.Anchored = true
+                    smoke.CanCollide = false
+                    smoke.Material = Enum.Material.SmoothPlastic
+                    smoke.Color = Color3.fromRGB(70, 70, 80)
+                    smoke.Transparency = 0.4
+                    smoke.Parent = workspace
+
+                    TweenService:Create(smoke, TweenInfo.new(1.2, Enum.EasingStyle.Quad), {
+                        Size = Vector3.new(75, 75, 75),
+                        Transparency = 1,
+                        Position = smoke.Position + Vector3.new(0, 40, 0)
+                    }):Play()
+
+                    task.delay(1.3, function() smoke:Destroy() end)
+                end)
+            end
+
+            task.delay(0.25, function() coreFlash:Destroy() end)
+        end)
+    end)
+
+    return tool
+end
+
+spawnButton.MouseButton1Click:Connect(function()
+    local backpack = player:FindFirstChild("Backpack")
+    if backpack then
+        if not backpack:FindFirstChild("RickPrimeBomb") and not player.Character:FindFirstChild("RickPrimeBomb") then
+            local bomb = createBombModel()
+            bomb.Parent = backpack
+        end
+    end
+end)
+                                                     
