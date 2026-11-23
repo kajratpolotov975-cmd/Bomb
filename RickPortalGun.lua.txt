@@ -1,0 +1,875 @@
+--[[
+  ПОРТАЛЬНАЯ ПУШКА РИКА  |  Roblox / Delta (LocalScript)
+  ЛКМ / тап  - выстрел портала (макс. 5 зарядов)
+  R / кнопка - перезарядка (как револьвер)
+  Зайди в портал - выйдешь из следующего
+]]
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local UIS          = game:GetService("UserInputService")
+local Debris       = game:GetService("Debris")
+local Workspace    = game:GetService("Workspace")
+
+local env = (getgenv and getgenv()) or _G
+if env.__RickPortalGunUnload then pcall(env.__RickPortalGunUnload) end
+
+local player = Players.LocalPlayer
+
+------------------------------------------------------------------
+-- НАСТРОЙКИ
+------------------------------------------------------------------
+local CFG = {
+	Ammo            = 5,      -- зарядов в барабане
+	MaxPortals      = 5,      -- максимум порталов на карте
+	ProjectileSpeed = 105,    -- скорость шарика
+	ShotCooldown    = 0.35,
+	TeleportCD      = 1.1,
+	PortalW         = 6.4,
+	PortalH         = 7.6,
+	ReloadKey       = Enum.KeyCode.R,
+}
+
+-- Звуки (можно менять ID на свои)
+local SND = {
+	Shoot     = "rbxassetid://142774034",   -- выстрел портала
+	Open      = "rbxassetid://182981587",   -- раскрытие портала
+	Idle      = "rbxassetid://148894502",   -- гул портала
+	Teleport  = "rbxassetid://171399373",   -- телепорт
+	Reload    = "rbxassetid://9049102600",  -- перезарядка револьвера
+	ReloadAlt = "rbxassetid://6338671353",  -- запасной звук перезарядки
+	Click     = "rbxasset://sounds/switch.wav",     -- щелчок барабана
+	Snap      = "rbxasset://sounds/snap.mp3",       -- закрытие барабана
+	Cock      = "rbxasset://sounds/clickfast.wav",  -- взвод
+}
+
+local W, H = CFG.PortalW, CFG.PortalH
+local GREEN = Color3.fromRGB(80, 255, 90)
+
+------------------------------------------------------------------
+-- УТИЛИТЫ
+------------------------------------------------------------------
+local conns, trash = {}, {}
+local function bind(sig, fn) local c = sig:Connect(fn); table.insert(conns, c); return c end
+local function junk(i) table.insert(trash, i); return i end
+
+local fxFolder = junk(Instance.new("Folder")); fxFolder.Name = "RPG_FX"; fxFolder.Parent = Workspace
+local portalFolder = junk(Instance.new("Folder")); portalFolder.Name = "RPG_Portals"; portalFolder.Parent = Workspace
+
+local function playSound(id, parent, vol, speed, maxDist)
+	local s = Instance.new("Sound")
+	s.SoundId = id
+	s.Volume = vol or 1
+	s.PlaybackSpeed = speed or 1
+	s.RollOffMaxDistance = maxDist or 90
+	s.Parent = parent or Workspace
+	s:Play()
+	Debris:AddItem(s, 8)
+	return s
+end
+
+local function mk(props)
+	local p = Instance.new("Part")
+	p.Anchored = false
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.Massless = true
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	for k, v in pairs(props) do p[k] = v end
+	return p
+end
+
+local function weld(p0, p1, c0)
+	local w = Instance.new("Weld")
+	w.Part0 = p0; w.Part1 = p1; w.C0 = c0 or CFrame.new()
+	w.Parent = p1
+	return w
+end
+
+local function corner(parent, scale)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(scale or 0.5, 0)
+	c.Parent = parent
+	return c
+end
+
+local function easeOutBack(x)
+	local c1 = 1.70158; local c3 = c1 + 1
+	return 1 + c3 * (x - 1) ^ 3 + c1 * (x - 1) ^ 2
+end
+
+-- поза пушки в руке: смещение и поворот самой пушки (градусы)
+local function pose(x, y, z, rx, ry, rz)
+	return (CFrame.new(x, y, z) * CFrame.Angles(math.rad(rx), math.rad(ry), math.rad(rz))):Inverse()
+end
+
+------------------------------------------------------------------
+-- ОБЩЕЕ СОСТОЯНИЕ
+------------------------------------------------------------------
+local G = { equipped = false, ammo = CFG.Ammo, reloading = false, reload = function() end, tool = nil }
+local allPortals = {}
+local tpCooldown = 0
+
+local function activePortals()
+	local t = {}
+	for _, d in ipairs(allPortals) do if not d.closing then table.insert(t, d) end end
+	return t
+end
+
+------------------------------------------------------------------
+-- ИНТЕРФЕЙС (счётчик зарядов + кнопка перезарядки для телефона)
+------------------------------------------------------------------
+local gui = junk(Instance.new("ScreenGui"))
+gui.Name = "RPG_UI"; gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true
+pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+if not gui.Parent then gui.Parent = player:WaitForChild("PlayerGui") end
+
+local ammoLbl = Instance.new("TextLabel")
+ammoLbl.AnchorPoint = Vector2.new(0.5, 1)
+ammoLbl.Position = UDim2.new(0.5, 0, 1, -120)
+ammoLbl.Size = UDim2.fromOffset(280, 40)
+ammoLbl.BackgroundColor3 = Color3.fromRGB(8, 30, 14)
+ammoLbl.BackgroundTransparency = 0.25
+ammoLbl.TextColor3 = Color3.fromRGB(150, 255, 160)
+ammoLbl.Font = Enum.Font.GothamBold
+ammoLbl.TextSize = 18
+ammoLbl.Visible = false
+ammoLbl.Parent = gui
+corner(ammoLbl, 0.3)
+local st = Instance.new("UIStroke"); st.Color = GREEN; st.Thickness = 1.5; st.Parent = ammoLbl
+
+local reloadBtn = Instance.new("TextButton")
+reloadBtn.AnchorPoint = Vector2.new(1, 1)
+reloadBtn.Position = UDim2.new(1, -20, 1, -170)
+reloadBtn.Size = UDim2.fromOffset(110, 46)
+reloadBtn.BackgroundColor3 = Color3.fromRGB(20, 120, 40)
+reloadBtn.Text = "⟳ Перезаряд"
+reloadBtn.TextColor3 = Color3.new(1, 1, 1)
+reloadBtn.Font = Enum.Font.GothamBold
+reloadBtn.TextSize = 14
+reloadBtn.Visible = false
+reloadBtn.Parent = gui
+corner(reloadBtn, 0.3)
+
+local cross = Instance.new("Frame")
+cross.AnchorPoint = Vector2.new(0.5, 0.5)
+cross.Position = UDim2.fromScale(0.5, 0.5)
+cross.Size = UDim2.fromOffset(8, 8)
+cross.BackgroundColor3 = GREEN
+cross.Visible = false
+cross.Parent = gui
+corner(cross, 0.5)
+
+local function refreshGui()
+	local on = G.equipped
+	ammoLbl.Visible = on
+	reloadBtn.Visible = on
+	cross.Visible = on and UIS.TouchEnabled and not UIS.MouseEnabled
+	if on then
+		local dots = string.rep("●", G.ammo) .. string.rep("○", CFG.Ammo - G.ammo)
+		local extra = G.reloading and "  ⟳ перезарядка..." or ""
+		ammoLbl.Text = dots .. "  порталов: " .. #activePortals() .. "/" .. CFG.MaxPortals .. extra
+		ammoLbl.TextSize = G.reloading and 15 or 17
+	end
+end
+bind(reloadBtn.MouseButton1Click, function() G.reload() end)
+
+------------------------------------------------------------------
+-- ПОРТАЛ (узоры как у Рика)
+------------------------------------------------------------------
+local function dot(parent, x, y, size, color, transp)
+	local f = Instance.new("Frame")
+	f.AnchorPoint = Vector2.new(0.5, 0.5)
+	f.Position = UDim2.fromOffset(x, y)
+	f.Size = UDim2.fromOffset(size, size)
+	f.BackgroundColor3 = color
+	f.BackgroundTransparency = transp
+	f.BorderSizePixel = 0
+	f.Parent = parent
+	corner(f, 0.5)
+	return f
+end
+
+local function buildFace(part, face)
+	local sg = Instance.new("SurfaceGui")
+	sg.Face = face
+	sg.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+	sg.CanvasSize = Vector2.new(640, 760)
+	sg.LightInfluence = 0
+	sg.Brightness = 2
+	sg.Parent = part
+
+	-- слои: светлый ободок -> тёмная глубина
+	local layers = {
+		{1.00, Color3.fromRGB(225, 255, 180)},
+		{0.95, Color3.fromRGB(120, 245, 75)},
+		{0.88, Color3.fromRGB(35, 160, 55)},
+		{0.80, Color3.fromRGB(10, 85, 32)},
+		{0.60, Color3.fromRGB(8, 60, 24)},
+	}
+	for _, l in ipairs(layers) do
+		local f = Instance.new("Frame")
+		f.AnchorPoint = Vector2.new(0.5, 0.5)
+		f.Position = UDim2.fromScale(0.5, 0.5)
+		f.Size = UDim2.fromScale(l[1], l[1])
+		f.BackgroundColor3 = l[2]
+		f.BorderSizePixel = 0
+		f.Parent = sg
+		corner(f, 0.5)
+	end
+
+	-- вращающаяся спираль 1 (4 рукава)
+	local spin1 = Instance.new("Frame")
+	spin1.AnchorPoint = Vector2.new(0.5, 0.5)
+	spin1.Position = UDim2.fromScale(0.5, 0.5)
+	spin1.Size = UDim2.fromOffset(520, 520)
+	spin1.BackgroundTransparency = 1
+	spin1.Parent = sg
+	for arm = 0, 3 do
+		for i = 0, 17 do
+			local r = 12 + i * 13.5
+			local ang = arm * math.pi / 2 + i * 0.30
+			local c = Color3.fromRGB(235, 255, 205):Lerp(Color3.fromRGB(70, 210, 70), i / 17)
+			dot(spin1, 260 + math.cos(ang) * r, 260 + math.sin(ang) * r, 6 + i * 0.9, c, 0.05 + (i / 17) * 0.3)
+		end
+	end
+
+	-- спираль 2 (тёмная, крутится в обратную сторону)
+	local spin2 = Instance.new("Frame")
+	spin2.AnchorPoint = Vector2.new(0.5, 0.5)
+	spin2.Position = UDim2.fromScale(0.5, 0.5)
+	spin2.Size = UDim2.fromOffset(520, 520)
+	spin2.BackgroundTransparency = 1
+	spin2.Parent = sg
+	for arm = 0, 2 do
+		for i = 0, 11 do
+			local r = 40 + i * 17
+			local ang = arm * math.pi * 2 / 3 - i * 0.45
+			dot(spin2, 260 + math.cos(ang) * r, 260 + math.sin(ang) * r, 12 - i * 0.4, Color3.fromRGB(15, 120, 45), 0.15)
+		end
+	end
+
+	-- пульсирующие кольца
+	local strokes = {}
+	for _, sc in ipairs({0.70, 0.45}) do
+		local ring = Instance.new("Frame")
+		ring.AnchorPoint = Vector2.new(0.5, 0.5)
+		ring.Position = UDim2.fromScale(0.5, 0.5)
+		ring.Size = UDim2.fromScale(sc, sc)
+		ring.BackgroundTransparency = 1
+		ring.Parent = sg
+		corner(ring, 0.5)
+		local s = Instance.new("UIStroke")
+		s.Thickness = 5; s.Color = Color3.fromRGB(195, 255, 150); s.Parent = ring
+		table.insert(strokes, s)
+	end
+
+	-- ядро
+	local glow = dot(sg, 0, 0, 120, Color3.fromRGB(235, 255, 215), 0.2)
+	glow.Position = UDim2.fromScale(0.5, 0.5)
+	local core = dot(sg, 0, 0, 52, Color3.fromRGB(255, 255, 255), 0.05)
+	core.Position = UDim2.fromScale(0.5, 0.5)
+
+	return { spin1 = spin1, spin2 = spin2, strokes = strokes, glow = glow, core = core }
+end
+
+local function makePortal(pos, normal)
+	local center = pos + normal * 0.2
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { player.Character, portalFolder, fxFolder }
+
+	-- на стене не даём провалиться в пол
+	if math.abs(normal.Y) < 0.5 then
+		local r = Workspace:Raycast(center, Vector3.new(0, -(H / 2 + 0.2), 0), params)
+		if r then
+			local d = (center - r.Position).Y
+			center = center + Vector3.new(0, H / 2 - d + 0.05, 0)
+		end
+	end
+
+	local upv = Vector3.yAxis
+	if math.abs(normal.Y) > 0.9 then upv = Vector3.zAxis end
+	local cf = CFrame.lookAt(center, center + normal, upv)
+
+	-- удаляем самый старый
+	local act = activePortals()
+	if #act >= CFG.MaxPortals then
+		act[1].closing = true; act[1].closeAt = os.clock()
+	end
+
+	local model = Instance.new("Folder"); model.Name = "Portal"; model.Parent = portalFolder
+
+	local part = mk({ Name = "PortalDisk", Size = Vector3.new(0.1, 0.1, 0.6), Transparency = 1, Anchored = true, CFrame = cf })
+	part.Parent = model
+
+	local faces = { buildFace(part, Enum.NormalId.Front), buildFace(part, Enum.NormalId.Back) }
+
+	local light = Instance.new("PointLight")
+	light.Color = GREEN; light.Range = 22; light.Brightness = 0; light.Parent = part
+
+	local em = Instance.new("ParticleEmitter")
+	em.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	em.Color = ColorSequence.new(Color3.fromRGB(160, 255, 150), Color3.fromRGB(60, 255, 90))
+	em.LightEmission = 1
+	em.Rate = 30
+	em.Lifetime = NumberRange.new(0.6, 1.1)
+	em.Speed = NumberRange.new(1.5, 4)
+	em.SpreadAngle = Vector2.new(180, 180)
+	em.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.5), NumberSequenceKeypoint.new(1, 0) })
+	em.Parent = part
+
+	local rim = {}
+	for i = 1, 20 do
+		local b = mk({ Shape = Enum.PartType.Ball, Size = Vector3.new(0.35, 0.35, 0.35), Color = Color3.fromRGB(150, 255, 120), Material = Enum.Material.Neon, Anchored = true })
+		b.Parent = model
+		rim[i] = b
+	end
+
+	playSound(SND.Open, part, 1.2, 1, 120)
+	local idle = playSound(SND.Idle, part, 0.35, 1, 45)
+	idle.Looped = true
+
+	local d = {
+		model = model, part = part, cf = cf, normal = normal, center = center,
+		born = os.clock(), closing = false, closeAt = 0, s = 0,
+		faces = faces, rim = rim, light = light, idle = idle, em = em,
+	}
+	table.insert(allPortals, d)
+	refreshGui()
+	return d
+end
+
+local function updatePortal(d, t)
+	local s
+	if d.closing then
+		local a = math.clamp((t - d.closeAt) / 0.45, 0, 1)
+		s = 1 - a * a
+		if a >= 1 then d.dead = true; return end
+	else
+		local a = math.clamp((t - d.born) / 0.65, 0, 1)
+		s = easeOutBack(a)
+	end
+	d.s = s
+	local sc = math.max(s, 0.001)
+	d.part.Size = Vector3.new(W * sc, H * sc, 0.6)
+	d.light.Brightness = 3.2 * math.clamp(s, 0, 1)
+	d.em.Rate = d.closing and 0 or 30
+
+	for _, f in ipairs(d.faces) do
+		f.spin1.Rotation = (t * 80) % 360
+		f.spin2.Rotation = -((t * 130) % 360)
+		for i, s2 in ipairs(f.strokes) do
+			s2.Transparency = 0.15 + 0.45 * (0.5 + 0.5 * math.sin(t * 4 + i * 1.7))
+		end
+		local g = 120 + 25 * math.sin(t * 5)
+		f.glow.Size = UDim2.fromOffset(g, g)
+		local c = 52 + 12 * math.sin(t * 8)
+		f.core.Size = UDim2.fromOffset(c, c)
+	end
+
+	-- светящийся ободок
+	for i, b in ipairs(d.rim) do
+		local ang = (i / #d.rim) * math.pi * 2 + t * 0.9
+		local cs, sn = math.cos(ang), math.sin(ang)
+		local x = (W / 2) * (cs >= 0 and 1 or -1) * math.abs(cs) ^ 0.85 * sc * 1.02
+		local y = (H / 2) * (sn >= 0 and 1 or -1) * math.abs(sn) ^ 0.85 * sc * 1.02
+		b.CFrame = d.cf * CFrame.new(x, y, -0.3)
+		local bs = (0.28 + 0.16 * math.sin(t * 6 + i)) * math.clamp(sc, 0, 1.2)
+		b.Size = Vector3.new(bs, bs, bs)
+	end
+end
+
+local function insidePortal(d, p)
+	local rel = d.cf:PointToObjectSpace(p)
+	local nx, ny = rel.X / (W / 2), rel.Y / (H / 2)
+	return (nx * nx + ny * ny) <= 1 and rel.Z > -2.4 and rel.Z < 1.3
+end
+
+local function teleportFrom(d, hrp)
+	local list = activePortals()
+	if #list < 2 then return end
+	local idx = table.find(list, d)
+	if not idx then return end
+	local dest = list[idx % #list + 1]
+	if dest == d then return end
+
+	local n = dest.normal
+	local pos, look
+	if n.Y > 0.9 then
+		pos = dest.center + n * 3.4
+	elseif n.Y < -0.9 then
+		pos = dest.center + n * 3.8
+	else
+		local y = dest.center.Y - H / 2 + 3.2
+		pos = dest.center + n * 2.6
+		pos = Vector3.new(pos.X, y, pos.Z)
+	end
+	if math.abs(n.Y) > 0.9 then
+		local lv = hrp.CFrame.LookVector
+		look = Vector3.new(lv.X, 0, lv.Z)
+		if look.Magnitude < 0.01 then look = Vector3.zAxis end
+	else
+		look = Vector3.new(n.X, 0, n.Z)
+	end
+
+	playSound(SND.Teleport, d.part, 1.3, 1, 100)
+	hrp.CFrame = CFrame.lookAt(pos, pos + look.Unit)
+	hrp.AssemblyLinearVelocity = n * 18
+	playSound(SND.Teleport, dest.part, 1.3, 1.1, 100)
+	tpCooldown = os.clock() + CFG.TeleportCD
+end
+
+------------------------------------------------------------------
+-- ШАРИК (летит из дула)
+------------------------------------------------------------------
+local function launchOrb(startPos, endPos, onArrive)
+	local orb = mk({ Shape = Enum.PartType.Ball, Size = Vector3.new(0.3, 0.3, 0.3), Color = GREEN, Material = Enum.Material.Neon, Anchored = true })
+	orb.Position = startPos
+	orb.Parent = fxFolder
+
+	local core = mk({ Shape = Enum.PartType.Ball, Size = Vector3.new(0.18, 0.18, 0.18), Color = Color3.new(1, 1, 1), Material = Enum.Material.Neon, Anchored = true })
+	core.Position = startPos; core.Parent = fxFolder
+
+	local a0 = Instance.new("Attachment", orb); a0.Position = Vector3.new(0, 0.3, 0)
+	local a1 = Instance.new("Attachment", orb); a1.Position = Vector3.new(0, -0.3, 0)
+	local tr = Instance.new("Trail")
+	tr.Attachment0 = a0; tr.Attachment1 = a1
+	tr.Lifetime = 0.4
+	tr.LightEmission = 1
+	tr.FaceCamera = true
+	tr.Color = ColorSequence.new(Color3.fromRGB(190, 255, 170), Color3.fromRGB(40, 220, 70))
+	tr.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.05), NumberSequenceKeypoint.new(1, 1) })
+	tr.WidthScale = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0) })
+	tr.Parent = orb
+
+	local pl = Instance.new("PointLight"); pl.Color = GREEN; pl.Range = 14; pl.Brightness = 3; pl.Parent = orb
+
+	local em = Instance.new("ParticleEmitter")
+	em.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	em.Color = ColorSequence.new(GREEN)
+	em.LightEmission = 1; em.Rate = 60
+	em.Lifetime = NumberRange.new(0.3, 0.5)
+	em.Speed = NumberRange.new(0, 2)
+	em.SpreadAngle = Vector2.new(180, 180)
+	em.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.35), NumberSequenceKeypoint.new(1, 0) })
+	em.Parent = orb
+
+	local dir = endPos - startPos
+	local dist = dir.Magnitude
+	local unit = dist > 0 and dir.Unit or Vector3.zAxis
+	local right = unit:Cross(Vector3.yAxis)
+	if right.Magnitude < 0.1 then right = Vector3.xAxis end
+	right = right.Unit
+	local up = right:Cross(unit)
+	local dur = math.max(dist / CFG.ProjectileSpeed, 0.1)
+	local t0 = os.clock()
+
+	local c
+	c = RunService.Heartbeat:Connect(function()
+		local a = (os.clock() - t0) / dur
+		if a >= 1 then
+			c:Disconnect()
+			orb:Destroy(); core:Destroy()
+			if onArrive then onArrive() end
+			return
+		end
+		local r = 0.35 * (1 - a) * math.min(a * 8, 1)
+		local off = right * math.cos(a * 38) * r + up * math.sin(a * 38) * r
+		local p = startPos + dir * a + off
+		orb.Position = p; core.Position = p
+		local sz = math.min(0.3 + a * 12, 0.75)
+		orb.Size = Vector3.new(sz, sz, sz)
+	end)
+end
+
+------------------------------------------------------------------
+-- ПРИЦЕЛ
+------------------------------------------------------------------
+local function getAim()
+	local cam = Workspace.CurrentCamera
+	local vp = cam.ViewportSize
+	local pos
+	if UIS.TouchEnabled and not UIS.MouseEnabled then
+		pos = Vector2.new(vp.X / 2, vp.Y / 2)
+	else
+		pos = UIS:GetMouseLocation()
+	end
+	local ray = cam:ViewportPointToRay(pos.X, pos.Y)
+	local ignore = { player.Character, portalFolder, fxFolder }
+	for _ = 1, 8 do
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = ignore
+		local res = Workspace:Raycast(ray.Origin, ray.Direction * 600, params)
+		if not res then break end
+		local inst = res.Instance
+		local isChar = inst:FindFirstAncestorOfClass("Model") and inst:FindFirstAncestorOfClass("Model"):FindFirstChildOfClass("Humanoid")
+		if inst.CanCollide == false or inst.Transparency > 0.9 or isChar then
+			table.insert(ignore, inst)
+		else
+			return res.Position, res.Normal, true
+		end
+	end
+	return ray.Origin + ray.Direction * 600, nil, false
+end
+
+------------------------------------------------------------------
+-- МОДЕЛЬ ПУШКИ + ЛОГИКА
+------------------------------------------------------------------
+local DRUM_Z = -0.85
+
+local function buildGun()
+	local tool = Instance.new("Tool")
+	tool.Name = "Portal Gun"
+	tool.ToolTip = "Портальная пушка Рика"
+	tool.RequiresHandle = true
+	tool.CanBeDropped = false
+	tool.Grip = CFrame.new()
+
+	local handle = mk({ Name = "Handle", Size = Vector3.new(0.4, 0.4, 1.2), Color = Color3.fromRGB(150, 100, 50), Material = Enum.Material.Wood, Transparency = 1, Massless = false })
+	handle.Parent = tool
+
+	local wood   = Color3.fromRGB(150, 98, 48)
+	local wood2  = Color3.fromRGB(176, 124, 66)
+	local tan    = Color3.fromRGB(214, 176, 118)
+	local brass  = Color3.fromRGB(205, 155, 55)
+	local dark   = Color3.fromRGB(60, 40, 25)
+
+	-- цилиндр вдоль оси пушки (ось Z, дуло в -Z)
+	local function cyl(name, len, dia, z, color, mat)
+		local p = mk({ Name = name, Shape = Enum.PartType.Cylinder, Size = Vector3.new(len, dia, dia), Color = color, Material = mat or Enum.Material.SmoothPlastic })
+		p.Parent = tool
+		weld(handle, p, CFrame.new(0, 0, z) * CFrame.Angles(0, math.rad(90), 0))
+		return p
+	end
+
+	cyl("GripWood", 1.0, 0.36, 0.25, wood2, Enum.Material.Wood)
+	cyl("Band1", 0.10, 0.46, 0.62, brass, Enum.Material.Metal)
+	cyl("Band2", 0.10, 0.46, -0.12, brass, Enum.Material.Metal)
+	cyl("Body", 0.50, 0.46, -0.42, wood, Enum.Material.Wood)
+	cyl("Barrel", 0.55, 0.32, -1.25, tan)
+	cyl("Flare1", 0.25, 0.50, -1.60, tan)
+	cyl("Flare2", 0.25, 0.72, -1.82, tan)
+	cyl("Flare3", 0.25, 0.96, -2.04, tan)
+	cyl("Rim", 0.07, 1.04, -2.18, brass, Enum.Material.Metal)
+	local flareGlow = cyl("FlareGlow", 0.02, 0.80, -2.215, Color3.fromRGB(255, 225, 80), Enum.Material.Neon)
+
+	-- жёлтые "языки" у раструба
+	for i = 1, 4 do
+		local a = math.rad(i * 90 + 25)
+		local f = mk({ Name = "Flame" .. i, Size = Vector3.new(0.10, 0.55, 0.26), Color = Color3.fromRGB(255, 205, 60), Material = Enum.Material.Neon })
+		f.Parent = tool
+		weld(handle, f, CFrame.new(math.cos(a) * 0.5, math.sin(a) * 0.5, -1.95) * CFrame.Angles(0, 0, a - math.rad(90)) * CFrame.Angles(math.rad(12), 0, 0))
+	end
+
+	-- барабан (вращается) + 5 зелёных зарядов
+	local drum = mk({ Name = "Drum", Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.30, 0.64, 0.64), Color = brass, Material = Enum.Material.Metal })
+	drum.Parent = tool
+	local drumAngle, drumSlide = 0, 0
+	local drumWeld = weld(handle, drum)
+	local function applyDrum()
+		drumWeld.C0 = CFrame.new(drumSlide, 0, DRUM_Z) * CFrame.Angles(0, 0, math.rad(drumAngle)) * CFrame.Angles(0, math.rad(90), 0)
+	end
+	applyDrum()
+
+	local pellets = {}
+	for i = 1, CFG.Ammo do
+		local a = math.rad((i - 1) * 72)
+		local p = mk({ Name = "Charge" .. i, Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.36, 0.13, 0.13), Color = GREEN, Material = Enum.Material.Neon })
+		p.Parent = tool
+		weld(drum, p, CFrame.new(0, math.cos(a) * 0.22, math.sin(a) * 0.22))
+		pellets[i] = p
+	end
+
+	-- провод + колба сбоку (зелёная лампа)
+	local wire = mk({ Name = "Wire", Shape = Enum.PartType.Cylinder, Size = Vector3.new(1.0, 0.05, 0.05), Color = dark, Material = Enum.Material.Fabric })
+	wire.Parent = tool
+	weld(handle, wire, CFrame.new(-0.3, 0.18, -0.65) * CFrame.Angles(0, math.rad(90), 0))
+
+	local arm = mk({ Name = "BulbArm", Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.5, 0.24, 0.24), Color = tan })
+	arm.Parent = tool
+	weld(handle, arm, CFrame.new(-0.4, 0, -1.2))
+	local cap = mk({ Name = "BulbCap", Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.12, 0.46, 0.46), Color = tan })
+	cap.Parent = tool
+	weld(handle, cap, CFrame.new(-0.7, 0, -1.2))
+
+	local bulb = mk({ Name = "Bulb", Shape = Enum.PartType.Ball, Size = Vector3.new(0.62, 0.62, 0.62), Color = Color3.fromRGB(60, 255, 80), Material = Enum.Material.Neon, Transparency = 0.12 })
+	bulb.Parent = tool
+	weld(handle, bulb, CFrame.new(-0.98, 0, -1.2))
+	local bulbCore = mk({ Name = "BulbCore", Shape = Enum.PartType.Ball, Size = Vector3.new(0.28, 0.28, 0.28), Color = Color3.fromRGB(220, 255, 220), Material = Enum.Material.Neon })
+	bulbCore.Parent = tool
+	weld(handle, bulbCore, CFrame.new(-0.98, 0, -1.2))
+
+	local bl = Instance.new("PointLight"); bl.Color = GREEN; bl.Range = 9; bl.Brightness = 2; bl.Parent = bulb
+	local be = Instance.new("ParticleEmitter")
+	be.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	be.Color = ColorSequence.new(GREEN); be.LightEmission = 1
+	be.Rate = 6; be.Lifetime = NumberRange.new(0.5, 0.9)
+	be.Speed = NumberRange.new(0.5, 1.5); be.SpreadAngle = Vector2.new(180, 180)
+	be.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 0) })
+	be.Parent = bulb
+
+	-- дуло
+	local muzzle = Instance.new("Attachment")
+	muzzle.Name = "Muzzle"; muzzle.Position = Vector3.new(0, 0, -2.35); muzzle.Parent = handle
+	local flash = Instance.new("ParticleEmitter")
+	flash.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	flash.Color = ColorSequence.new(Color3.fromRGB(200, 255, 170), GREEN)
+	flash.LightEmission = 1; flash.Rate = 0
+	flash.Lifetime = NumberRange.new(0.25, 0.45)
+	flash.Speed = NumberRange.new(8, 16); flash.SpreadAngle = Vector2.new(25, 25)
+	flash.EmissionDirection = Enum.NormalId.Front
+	flash.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.6), NumberSequenceKeypoint.new(1, 0) })
+	flash.Parent = muzzle
+	local mLight = Instance.new("PointLight"); mLight.Color = GREEN; mLight.Range = 16; mLight.Brightness = 0; mLight.Parent = handle
+
+	------------------ анимации руки ------------------
+	local gripToken = 0
+	local function gripTo(target, t, ease)
+		gripToken += 1
+		local my = gripToken
+		local from = tool.Grip
+		local t0 = os.clock()
+		task.spawn(function()
+			while my == gripToken do
+				local a = math.clamp((os.clock() - t0) / t, 0, 1)
+				local e = ease and ease(a) or (1 - (1 - a) ^ 2)
+				tool.Grip = from:Lerp(target, e)
+				if a >= 1 then break end
+				RunService.Heartbeat:Wait()
+			end
+		end)
+	end
+	local function step(target, t, ease) gripTo(target, t, ease); task.wait(t) end
+
+	local function spinDrum(toAngle, toSlide, t)
+		local fa, fs = drumAngle, drumSlide
+		local t0 = os.clock()
+		while true do
+			local a = math.clamp((os.clock() - t0) / t, 0, 1)
+			local e = 1 - (1 - a) ^ 3
+			drumAngle = fa + (toAngle - fa) * e
+			drumSlide = fs + (toSlide - fs) * e
+			applyDrum()
+			if a >= 1 then break end
+			RunService.Heartbeat:Wait()
+		end
+	end
+
+	local function flourish(t)
+		gripToken += 1
+		local my = gripToken
+		local t0 = os.clock()
+		while my == gripToken do
+			local a = math.clamp((os.clock() - t0) / t, 0, 1)
+			local e = a * a * (3 - 2 * a)
+			tool.Grip = pose(0, 0.05, 0.3, 10 * (1 - e), 0, -15 + 360 * e)
+			if a >= 1 then break end
+			RunService.Heartbeat:Wait()
+		end
+	end
+
+	local IDLE = pose(0, 0, 0, 0, 0, 0)
+
+	local function spawnShells()
+		for i = 1, CFG.Ammo do
+			local s = mk({ Shape = Enum.PartType.Cylinder, Size = Vector3.new(0.28, 0.14, 0.14), Color = Color3.fromRGB(190, 140, 50), Material = Enum.Material.Metal, CanCollide = false, Massless = false })
+			s.CFrame = drum.CFrame * CFrame.new(0, 0, 0)
+			s.Parent = fxFolder
+			s.AssemblyLinearVelocity = Vector3.new(math.random(-6, 6), math.random(-3, 2), math.random(-6, 6))
+			s.AssemblyAngularVelocity = Vector3.new(math.random(-12, 12), math.random(-12, 12), math.random(-12, 12))
+			Debris:AddItem(s, 2.5)
+			task.delay(0.25, function() if s.Parent then s.CanCollide = true end end)
+		end
+	end
+
+	local function setCharges(n)
+		for i = 1, CFG.Ammo do pellets[i].Transparency = (i <= n) and 0 or 1 end
+	end
+
+	local function reload()
+		if G.reloading or G.ammo >= CFG.Ammo then return end
+		G.reloading = true
+		refreshGui()
+		task.spawn(function()
+			pcall(function()
+				playSound(SND.Reload, handle, 1.4, 1, 60)
+				-- 1) наклон, барабан выезжает
+				step(pose(0.15, 0.1, 0.5, 20, 0, -40), 0.28)
+				playSound(SND.Click, handle, 1.2, 0.8, 40)
+				spinDrum(drumAngle, 0.55, 0.22)
+				task.wait(0.15)
+				-- 2) дуло вверх, вытряхиваем гильзы
+				step(pose(0.15, 0.4, 0.6, 75, 0, -40), 0.3)
+				spawnShells()
+				setCharges(0)
+				playSound(SND.Click, handle, 1, 0.6, 40)
+				step(pose(0.15, 0.45, 0.7, 82, 0, -40), 0.1)
+				step(pose(0.15, 0.35, 0.55, 70, 0, -40), 0.1)
+				task.wait(0.15)
+				-- 3) дуло вниз, вставляем заряды по одному
+				step(pose(0.1, -0.1, 0.4, -30, 0, -30), 0.3)
+				for i = 1, CFG.Ammo do
+					task.wait(0.2)
+					pellets[i].Transparency = 0
+					playSound(SND.Click, handle, 1.1, 1.2 + i * 0.07, 40)
+					spinDrum(drumAngle + 72, drumSlide, 0.12)
+				end
+				task.wait(0.15)
+				-- 4) закрываем барабан
+				step(pose(0.05, 0.1, 0.4, 15, 0, -15), 0.22)
+				spinDrum(drumAngle, 0, 0.15)
+				playSound(SND.Snap, handle, 1.2, 1.1, 40)
+				task.wait(0.12)
+				-- 5) проворот пушки и взвод
+				playSound(SND.Cock, handle, 1, 0.9, 40)
+				flourish(0.5)
+				playSound(SND.Cock, handle, 1.2, 0.7, 40)
+				step(IDLE, 0.2)
+			end)
+			G.ammo = CFG.Ammo
+			setCharges(CFG.Ammo)
+			G.reloading = false
+			refreshGui()
+		end)
+	end
+
+	local lastShot = 0
+	local function fire()
+		if not G.equipped or G.reloading then return end
+		if G.ammo <= 0 then reload(); return end
+		if os.clock() - lastShot < CFG.ShotCooldown then return end
+		local char = player.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not hum or hum.Health <= 0 then return end
+		lastShot = os.clock()
+
+		local aimPos, aimNormal, hit = getAim()
+		local usedCharge = G.ammo
+		G.ammo -= 1
+		pellets[usedCharge].Transparency = 1
+		refreshGui()
+
+		-- вспышка + звук
+		playSound(SND.Shoot, handle, 1.2, 1, 120)
+		flash:Emit(14)
+		mLight.Brightness = 4
+		task.delay(0.07, function() mLight.Brightness = 0 end)
+
+		-- отдача: рука с пушкой откатывается назад и вверх
+		task.spawn(function()
+			gripToken += 1
+			tool.Grip = pose(0, 0.12, 0.75, 32, 0, 0)
+			task.wait(0.04)
+			gripTo(IDLE, 0.34, function(a) return 1 - (1 - a) ^ 3 end)
+		end)
+		task.spawn(function() spinDrum(drumAngle + 72, drumSlide, 0.14) end)
+
+		-- шарик из дула
+		launchOrb(muzzle.WorldPosition, aimPos, function()
+			if hit and aimNormal then makePortal(aimPos, aimNormal) end
+			refreshGui()
+		end)
+
+		if G.ammo <= 0 then task.delay(1.0, reload) end
+	end
+
+	------------------ события ------------------
+	local tconns = {}
+	local function tbind(sig, fn) local c = sig:Connect(fn); table.insert(tconns, c); table.insert(conns, c) end
+
+	tbind(tool.Equipped, function()
+		G.equipped = true
+		tool.Grip = IDLE
+		refreshGui()
+	end)
+	tbind(tool.Unequipped, function()
+		G.equipped = false
+		refreshGui()
+	end)
+	tbind(tool.Activated, fire)
+	tbind(tool.Destroying, function()
+		for _, c in ipairs(tconns) do pcall(function() c:Disconnect() end) end
+		if G.tool == tool then G.equipped = false; G.tool = nil; refreshGui() end
+	end)
+	tbind(RunService.Heartbeat, function()
+		local t = os.clock()
+		bl.Brightness = 2 + 0.8 * math.sin(t * 5)
+		flareGlow.Transparency = 0.1 + 0.2 * math.sin(t * 7)
+	end)
+
+	G.reload = reload
+	G.tool = tool
+	G.ammo = CFG.Ammo
+	return tool
+end
+
+------------------------------------------------------------------
+-- ВЫДАЧА ПУШКИ В ИНВЕНТАРЬ
+------------------------------------------------------------------
+local function giveGun()
+	local backpack = player:WaitForChild("Backpack")
+	local char = player.Character
+	if backpack:FindFirstChild("Portal Gun") or (char and char:FindFirstChild("Portal Gun")) then return end
+	local tool = buildGun()
+	tool.Parent = backpack
+end
+
+bind(player.CharacterAdded, function()
+	task.wait(0.6)
+	G.reloading = false
+	giveGun()
+end)
+
+bind(UIS.InputBegan, function(input, gp)
+	if gp then return end
+	if input.KeyCode == CFG.ReloadKey and G.equipped then G.reload() end
+end)
+
+------------------------------------------------------------------
+-- ГЛАВНЫЙ ЦИКЛ: анимация порталов + телепортация
+------------------------------------------------------------------
+bind(RunService.Heartbeat, function()
+	local t = os.clock()
+	for i = #allPortals, 1, -1 do
+		local d = allPortals[i]
+		updatePortal(d, t)
+		if d.dead then
+			pcall(function() d.idle:Stop() end)
+			d.model:Destroy()
+			table.remove(allPortals, i)
+			refreshGui()
+		end
+	end
+
+	if t > tpCooldown then
+		local char = player.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			for _, d in ipairs(allPortals) do
+				if not d.closing and d.s > 0.85 then
+					if insidePortal(d, hrp.Position) or insidePortal(d, hrp.Position - Vector3.new(0, 2.8, 0)) then
+						teleportFrom(d, hrp)
+						break
+					end
+				end
+			end
+		end
+	end
+end)
+
+giveGun()
+
+------------------------------------------------------------------
+-- ВЫГРУЗКА (при повторном запуске скрипта)
+------------------------------------------------------------------
+env.__RickPortalGunUnload = function()
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	for _, i in ipairs(trash) do pcall(function() i:Destroy() end) end
+	if G.tool then pcall(function() G.tool:Destroy() end) end
+end
+
+print("[Rick Portal Gun] загружена! Возьми Portal Gun из инвентаря. R - перезарядка.")
