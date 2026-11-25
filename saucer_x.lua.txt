@@ -1,0 +1,613 @@
+--[[
+  SAUCER-X  |  летающая тарелка для Delta (Roblox)
+  - Спавн перед тобой, оригинальный дизайн: купол, полосы, фары, колёса, капсулы, мачта
+  - Двери раздвигаются, капот и багажник открываются вверх
+  - Внутри кресла и пульт, можно сесть и летать
+  Клавиши: G сесть/выйти | Z двери | X капот | C багажник | L свет
+  Полёт: WASD, Space вверх, Ctrl/Q вниз, Shift ускорение (телефон: джойстик + кнопки)
+]]
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UIS          = game:GetService("UserInputService")
+local StarterGui   = game:GetService("StarterGui")
+local Workspace    = game:GetService("Workspace")
+
+local env = (getgenv and getgenv()) or _G
+if env.__SaucerX then pcall(env.__SaucerX) end
+
+local lp = Players.LocalPlayer
+
+local connections = {}
+local ship, root, beacon
+local lensList, lightList = {}, {}
+local anim = { doors = {}, hood = {}, trunk = {} }
+local state = { doors = false, hood = false, trunk = false, lights = true, seated = false }
+local speed = 70
+local vertUp, vertDown = false, false
+local busy = false
+
+local pos, yaw, pitch, roll, vel = Vector3.zero, 0, 0, 0, Vector3.zero
+local seatRel = CFrame.new(-1.3, 4.1, 0.8)
+
+local gui, statusLabel, seatBtn, speedBtn, fly
+local exitShip, enterShip, updateSeatBtn
+
+local C = {
+	hull   = Color3.fromRGB(104, 111, 118),
+	hull2  = Color3.fromRGB(78, 84, 90),
+	dark   = Color3.fromRGB(42, 46, 51),
+	black  = Color3.fromRGB(24, 26, 29),
+	orange = Color3.fromRGB(255, 166, 30),
+	cyan   = Color3.fromRGB(80, 220, 255),
+	green  = Color3.fromRGB(90, 255, 140),
+	glass  = Color3.fromRGB(150, 205, 225),
+	brass  = Color3.fromRGB(150, 125, 60),
+}
+
+local function say(text)
+	if statusLabel then statusLabel.Text = text end
+	pcall(function()
+		StarterGui:SetCore("SendNotification", { Title = "Saucer-X", Text = text, Duration = 3 })
+	end)
+end
+
+---------------------------------------------------------------------
+-- Анимация деталей (двери / капот / багажник)
+---------------------------------------------------------------------
+local function reg(group, weld, closed, open)
+	table.insert(anim[group], { w = weld, c = closed, o = open })
+end
+
+local function setGroup(group, open, instant)
+	state[group] = open
+	for _, a in ipairs(anim[group]) do
+		if a.w and a.w.Parent then
+			local target = open and a.o or a.c
+			if instant then
+				a.w.C0 = target
+			else
+				TweenService:Create(a.w, TweenInfo.new(0.9, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), { C0 = target }):Play()
+			end
+		end
+	end
+end
+
+---------------------------------------------------------------------
+-- Сборка тарелки
+---------------------------------------------------------------------
+local BLOCK, BALL, CYL = Enum.PartType.Block, Enum.PartType.Ball, Enum.PartType.Cylinder
+
+local function mk(name, shape, size, rel, color, mat, o)
+	o = o or {}
+	local p = Instance.new("Part")
+	p.Name = name
+	p.Shape = shape
+	p.Size = size
+	p.Color = color
+	p.Material = mat or Enum.Material.Metal
+	p.Anchored = false
+	p.CanCollide = o.collide or false
+	p.CanTouch = false
+	p.Massless = true
+	p.Transparency = o.tr or 0
+	p.Reflectance = o.refl or 0
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.CFrame = root.CFrame * rel
+	p.Parent = ship
+	local w = Instance.new("Weld")
+	w.Part0 = root
+	w.Part1 = p
+	w.C0 = rel
+	w.Parent = p
+	return p, w
+end
+
+local function disc(name, y, h, d, color, mat, o)
+	return mk(name, CYL, Vector3.new(h, d, d), CFrame.new(0, y, 0) * CFrame.Angles(0, 0, math.pi / 2), color, mat, o)
+end
+
+local function zcyl(name, len, d, rel, color, mat, o)
+	return mk(name, CYL, Vector3.new(len, d, d), rel * CFrame.Angles(0, math.pi / 2, 0), color, mat, o)
+end
+
+-- крышка с петлёй (капот dir=-1, багажник dir=+1)
+local function compartment(group, dir, wallH, ang, fill)
+	local zc = dir * 7.05
+	local base = 1.8
+	local top = base + wallH
+	mk(group .. "WL", BLOCK, Vector3.new(0.2, wallH, 2.1), CFrame.new(-2.1, base + wallH / 2, zc), C.hull2)
+	mk(group .. "WR", BLOCK, Vector3.new(0.2, wallH, 2.1), CFrame.new(2.1, base + wallH / 2, zc), C.hull2)
+	mk(group .. "WF", BLOCK, Vector3.new(4.4, wallH, 0.2), CFrame.new(0, base + wallH / 2, dir * 8.1), C.hull2)
+	mk(group .. "Floor", BLOCK, Vector3.new(4, 0.1, 2.1), CFrame.new(0, 1.85, zc), C.black)
+	fill(zc)
+
+	local closed = CFrame.new(0, top + 0.1, zc)
+	local hinge = Vector3.new(0, top + 0.1, dir * 6.0)
+	local open = CFrame.new(hinge) * CFrame.Angles(-dir * math.rad(ang), 0, 0) * CFrame.new(-hinge) * closed
+	local delta = open * closed:Inverse()
+
+	local lid, w = mk(group .. "Lid", BLOCK, Vector3.new(4.4, 0.2, 2.2), closed, C.hull, Enum.Material.Metal)
+	reg(group, w, closed, open)
+
+	local sRel = CFrame.new(0, top + 0.22, zc)
+	local _, w2 = mk(group .. "LidStripe", BLOCK, Vector3.new(0.3, 0.05, 1.7), sRel, C.orange, Enum.Material.Neon)
+	reg(group, w2, sRel, delta * sRel)
+
+	local hRel = CFrame.new(0, top + 0.22, zc + dir * 0.9)
+	local _, w3 = mk(group .. "LidHandle", BLOCK, Vector3.new(1.0, 0.08, 0.2), hRel, C.dark)
+	reg(group, w3, hRel, delta * hRel)
+end
+
+local function build(cf)
+	ship = Instance.new("Model")
+	ship.Name = "SaucerX"
+
+	root = Instance.new("Part")
+	root.Name = "Root"
+	root.Size = Vector3.new(1, 1, 1)
+	root.Transparency = 1
+	root.Anchored = true
+	root.CanCollide = false
+	root.CanTouch = false
+	root.CanQuery = false
+	root.CFrame = cf
+	root.Parent = ship
+	ship.PrimaryPart = root
+
+	lensList, lightList = {}, {}
+	anim = { doors = {}, hood = {}, trunk = {} }
+	state.doors, state.hood, state.trunk = false, false, false
+
+	-- корпус
+	disc("Belly", -1.0, 1.2, 9, C.dark, Enum.Material.Metal, { collide = true })
+	disc("Lower", 0, 0.8, 14, C.hull2, Enum.Material.Metal, { collide = true })
+	disc("SeamLow", 0.4, 0.25, 17.3, C.dark)
+	disc("Main", 1.1, 1.4, 17, C.hull, Enum.Material.Metal, { collide = true })
+	disc("Deck", 2.1, 0.6, 12, C.hull, Enum.Material.Metal, { collide = true })
+	disc("Rim", 2.55, 0.3, 9.8, C.dark)
+
+	-- нижнее свечение
+	local thrust = disc("Thrust", -1.62, 0.1, 5, C.green, Enum.Material.Neon, { tr = 0.2 })
+	local tl = Instance.new("PointLight")
+	tl.Color = C.green; tl.Brightness = 1.2; tl.Range = 18
+	tl.Parent = thrust
+
+	-- купол
+	mk("Dome", BALL, Vector3.new(9, 9, 9), CFrame.new(0, 3.2, 0), C.glass, Enum.Material.Glass, { tr = 0.6, refl = 0.08 })
+	mk("DomeArc", CYL, Vector3.new(0.18, 9.0, 9.0), CFrame.new(0, 3.2, 0), C.dark, Enum.Material.Metal, { tr = 1 })
+
+	-- колёса
+	for _, sx in ipairs({ -5, 5 }) do
+		for _, sz in ipairs({ -3.5, 3.5 }) do
+			mk("Wheel", CYL, Vector3.new(0.9, 2.2, 2.2), CFrame.new(sx, -0.9, sz), C.black, Enum.Material.Slate)
+			mk("Hub", CYL, Vector3.new(0.95, 1.0, 1.0), CFrame.new(sx, -0.9, sz), C.hull2, Enum.Material.Metal)
+		end
+	end
+
+	-- оранжевые полосы
+	for _, a in ipairs({ 38, -38, 142, -142 }) do
+		local r = math.rad(a)
+		mk("Stripe", BLOCK, Vector3.new(0.35, 1.4, 0.14), CFrame.Angles(0, r, 0) * CFrame.new(0, 1.1, -8.55), C.orange, Enum.Material.Neon)
+		mk("StripeLow", BLOCK, Vector3.new(0.3, 0.7, 0.14), CFrame.Angles(0, r, 0) * CFrame.new(0, 0, -7.05), C.orange, Enum.Material.Neon)
+		mk("StripeDeck", BLOCK, Vector3.new(0.3, 0.55, 0.14), CFrame.Angles(0, r, 0) * CFrame.new(0, 2.1, -6.05), C.orange, Enum.Material.Neon)
+	end
+
+	-- фары
+	for _, sx in ipairs({ -3, 3 }) do
+		zcyl("LampHousing", 0.6, 1.9, CFrame.new(sx, 1.0, -7.9), C.brass, Enum.Material.Metal)
+		local lens = zcyl("LampLens", 0.2, 1.45, CFrame.new(sx, 1.0, -8.25), Color3.fromRGB(255, 244, 190), Enum.Material.Neon)
+		local pl = Instance.new("PointLight")
+		pl.Color = Color3.fromRGB(255, 240, 180); pl.Brightness = 2; pl.Range = 28
+		pl.Parent = lens
+		table.insert(lensList, lens)
+		table.insert(lightList, pl)
+	end
+
+	-- боковые капсулы
+	for _, sx in ipairs({ -1, 1 }) do
+		mk("PodStrut", BLOCK, Vector3.new(1.2, 1.0, 1.5), CFrame.new(sx * 7.0, 2.3, 3.6), C.dark)
+		zcyl("Pod", 3.8, 3.2, CFrame.new(sx * 7.0, 3.4, 3.6), C.hull2, Enum.Material.Metal)
+		zcyl("PodBand", 0.35, 3.35, CFrame.new(sx * 7.0, 3.4, 3.6), C.dark)
+		zcyl("PodCapF", 0.3, 3.0, CFrame.new(sx * 7.0, 3.4, 1.7), C.black)
+		zcyl("PodFan", 0.15, 2.3, CFrame.new(sx * 7.0, 3.4, 5.55), C.cyan, Enum.Material.Neon, { tr = 0.3 })
+	end
+
+	-- мачта с флажком и маяком
+	mk("Mast", BLOCK, Vector3.new(0.15, 6, 0.15), CFrame.new(7.0, 8.0, 4.8) * CFrame.Angles(0, 0, -0.12), C.dark)
+	mk("Flag", BLOCK, Vector3.new(0.05, 1.0, 1.8), CFrame.new(7.22, 10.0, 5.8), Color3.fromRGB(180, 90, 60), Enum.Material.SmoothPlastic)
+	beacon = mk("Beacon", BALL, Vector3.new(0.5, 0.5, 0.5), CFrame.new(7.36, 11.1, 4.8), Color3.fromRGB(255, 70, 70), Enum.Material.Neon)
+
+	-- салон: кресла и пульт
+	for _, sx in ipairs({ -1.3, 1.3 }) do
+		mk("SeatBase", BLOCK, Vector3.new(1.3, 0.5, 1.3), CFrame.new(sx, 2.65, 0.8), C.dark, Enum.Material.Fabric)
+		mk("SeatBack", BLOCK, Vector3.new(1.3, 1.7, 0.35), CFrame.new(sx, 3.5, 1.5), C.dark, Enum.Material.Fabric)
+		mk("SeatHead", BLOCK, Vector3.new(1.0, 0.5, 0.3), CFrame.new(sx, 4.5, 1.5), C.hull2, Enum.Material.Fabric)
+	end
+	mk("Pedestal", BLOCK, Vector3.new(4.2, 0.6, 0.9), CFrame.new(0, 2.7, -2.1), C.black)
+	local consoleCF = CFrame.new(0, 2.95, -2.1) * CFrame.Angles(math.rad(25), 0, 0)
+	mk("Console", BLOCK, Vector3.new(4.6, 0.8, 1.2), consoleCF, C.hull2)
+	for _, x in ipairs({ -1.4, -0.3, 0.9 }) do
+		mk("Screen", BLOCK, Vector3.new(0.9, 0.04, 0.55), consoleCF * CFrame.new(x, 0.42, 0.05), C.cyan, Enum.Material.Neon)
+	end
+	mk("BtnG", CYL, Vector3.new(0.08, 0.22, 0.22), consoleCF * CFrame.new(1.8, 0.42, 0.3) * CFrame.Angles(0, 0, math.pi / 2), C.green, Enum.Material.Neon)
+	mk("BtnR", CYL, Vector3.new(0.08, 0.22, 0.22), consoleCF * CFrame.new(-1.9, 0.42, 0.3) * CFrame.Angles(0, 0, math.pi / 2), Color3.fromRGB(255, 70, 70), Enum.Material.Neon)
+
+	-- двери (раздвигаются вперёд и назад)
+	for _, side in ipairs({ -1, 1 }) do
+		mk("DoorCavity", BLOCK, Vector3.new(0.3, 1.1, 3.6), CFrame.new(side * 8.35, 1.1, 0), C.black)
+		mk("DoorGlow", BLOCK, Vector3.new(0.05, 0.3, 3.0), CFrame.new(side * 8.52, 1.5, 0), C.cyan, Enum.Material.Neon)
+		for _, dir in ipairs({ -1, 1 }) do
+			local closed = CFrame.new(side * 8.6, 1.1, dir * 0.9)
+			local open = CFrame.new(side * 7.95, 1.1, dir * 2.9)
+			local delta = open * closed:Inverse()
+			local _, w = mk("Door", BLOCK, Vector3.new(0.3, 1.2, 1.8), closed, C.hull, Enum.Material.Metal)
+			reg("doors", w, closed, open)
+			local hr = CFrame.new(side * 8.8, 1.1, dir * 0.2)
+			local _, w2 = mk("DoorHandle", BLOCK, Vector3.new(0.12, 0.45, 0.18), hr, C.dark)
+			reg("doors", w2, hr, delta * hr)
+			local sr = CFrame.new(side * 8.77, 1.45, dir * 1.0)
+			local _, w3 = mk("DoorStripe", BLOCK, Vector3.new(0.05, 0.12, 1.3), sr, C.orange, Enum.Material.Neon)
+			reg("doors", w3, sr, delta * sr)
+		end
+	end
+
+	-- капот (спереди): двигатель
+	compartment("hood", -1, 0.8, 70, function(zc)
+		mk("Engine", BLOCK, Vector3.new(1.5, 0.5, 1.4), CFrame.new(-1.0, 2.15, zc), C.dark)
+		mk("EngineGlow", BLOCK, Vector3.new(1.3, 0.1, 0.6), CFrame.new(1.0, 1.98, zc - 0.1), C.cyan, Enum.Material.Neon)
+		mk("Coil", CYL, Vector3.new(0.6, 0.7, 0.7), CFrame.new(1.0, 2.25, zc - 0.7) * CFrame.Angles(0, 0, math.pi / 2), C.hull2)
+		zcyl("Pipe", 1.6, 0.25, CFrame.new(0.2, 2.3, zc), C.brass)
+	end)
+
+	-- багажник (сзади): ящики
+	compartment("trunk", 1, 1.0, 70, function(zc)
+		mk("Crate", BLOCK, Vector3.new(1.4, 0.8, 1.2), CFrame.new(-1.0, 2.3, zc), Color3.fromRGB(150, 110, 70), Enum.Material.Wood)
+		mk("CrateStrap", BLOCK, Vector3.new(1.45, 0.82, 0.15), CFrame.new(-1.0, 2.3, zc), C.dark)
+		mk("Box", BLOCK, Vector3.new(1.2, 0.7, 1.0), CFrame.new(1.0, 2.25, zc + 0.15), Color3.fromRGB(80, 110, 95), Enum.Material.Metal)
+	end)
+
+	ship.Parent = Workspace
+	setLights(state.lights)
+end
+
+function setLights(on)
+	state.lights = on
+	for _, l in ipairs(lensList) do
+		if l and l.Parent then
+			l.Material = on and Enum.Material.Neon or Enum.Material.SmoothPlastic
+		end
+	end
+	for _, l in ipairs(lightList) do
+		if l and l.Parent then l.Enabled = on end
+	end
+end
+
+---------------------------------------------------------------------
+-- Спавн / удаление
+---------------------------------------------------------------------
+local function destroyShip()
+	if state.seated then exitShip() end
+	if ship then ship:Destroy() end
+	ship, root, beacon = nil, nil, nil
+end
+
+local function spawnShip()
+	destroyShip()
+	local char = lp.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then say("Персонаж не найден") return end
+	local look = hrp.CFrame.LookVector
+	look = Vector3.new(look.X, 0, look.Z)
+	if look.Magnitude < 0.01 then look = Vector3.new(0, 0, -1) end
+	look = look.Unit
+	local p = hrp.Position + look * 24
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.FilterDescendantsInstances = { char }
+	local hit = Workspace:Raycast(p + Vector3.new(0, 60, 0), Vector3.new(0, -300, 0), rp)
+	local y = hit and (hit.Position.Y + 2.1) or (hrp.Position.Y - 1.0)
+	yaw = math.atan2(-look.X, -look.Z) + math.pi
+	pitch, roll, vel = 0, 0, Vector3.zero
+	pos = Vector3.new(p.X, y, p.Z)
+	build(CFrame.new(pos) * CFrame.Angles(0, yaw, 0))
+	updateSeatBtn()
+	say("Тарелка готова. Подойди и нажми «Сесть» (G)")
+end
+
+---------------------------------------------------------------------
+-- Посадка / выход
+---------------------------------------------------------------------
+function updateSeatBtn()
+	if seatBtn then seatBtn.Text = state.seated and "Выйти (G)" or "Сесть (G)" end
+end
+
+function enterShip()
+	if state.seated or busy then return end
+	if not ship then say("Сначала создай тарелку") return end
+	local char = lp.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not (hum and hrp) then return end
+	if (hrp.Position - root.Position).Magnitude > 45 then
+		say("Подойди ближе к тарелке (до 45 стадов)")
+		return
+	end
+	busy = true
+	setGroup("doors", true)
+	task.spawn(function()
+		task.wait(0.7)
+		if ship and ship.Parent and hum.Parent then
+			yaw = select(2, root.CFrame:ToEulerAnglesYXZ())
+			pitch, roll, vel = 0, 0, Vector3.zero
+			pos = root.Position
+			state.seated = true
+			hum.AutoRotate = false
+			hrp.Anchored = true
+			hrp.CFrame = root.CFrame * seatRel
+			hum.Sit = true
+			if fly then fly.Visible = true end
+			updateSeatBtn()
+			task.wait(0.6)
+			setGroup("doors", false)
+			say("Полёт: WASD / джойстик, Space или ▲ — вверх")
+		end
+		busy = false
+	end)
+end
+
+function exitShip()
+	if not state.seated then return end
+	state.seated = false
+	if fly then fly.Visible = false end
+	local char = lp.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if hrp and root then
+		hrp.Anchored = false
+		hrp.CFrame = root.CFrame * CFrame.new(11.5, 1.0, 0)
+		hrp.AssemblyLinearVelocity = Vector3.zero
+	elseif hrp then
+		hrp.Anchored = false
+	end
+	if hum then
+		hum.Sit = false
+		hum.AutoRotate = true
+		hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+	end
+	updateSeatBtn()
+	if ship then
+		setGroup("doors", true)
+		task.delay(2, function()
+			if ship and ship.Parent and not state.seated then setGroup("doors", false) end
+		end)
+	end
+end
+
+---------------------------------------------------------------------
+-- Полёт
+---------------------------------------------------------------------
+local controls
+pcall(function()
+	local ps = lp:FindFirstChild("PlayerScripts")
+	local pm = ps and ps:FindFirstChild("PlayerModule")
+	if pm then controls = require(pm):GetControls() end
+end)
+
+local function getMove()
+	local mv = Vector3.zero
+	if controls then
+		local ok, v = pcall(function() return controls:GetMoveVector() end)
+		if ok and v then mv = v end
+	end
+	if mv.Magnitude < 0.05 then
+		local x, z = 0, 0
+		if UIS:IsKeyDown(Enum.KeyCode.W) then z = z - 1 end
+		if UIS:IsKeyDown(Enum.KeyCode.S) then z = z + 1 end
+		if UIS:IsKeyDown(Enum.KeyCode.D) then x = x + 1 end
+		if UIS:IsKeyDown(Enum.KeyCode.A) then x = x - 1 end
+		mv = Vector3.new(x, 0, z)
+	end
+	return mv
+end
+
+table.insert(connections, RunService.RenderStepped:Connect(function(dt)
+	if not (ship and ship.Parent and root) then return end
+	local t = os.clock()
+	if beacon then beacon.Transparency = (math.sin(t * 5) > 0) and 0 or 0.7 end
+	if not state.seated then return end
+
+	local char = lp.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not (hum and hrp) or hum.Health <= 0 then exitShip() return end
+
+	local mv = getMove()
+	local fwd = -mv.Z
+	local turn = mv.X
+	local boost = UIS:IsKeyDown(Enum.KeyCode.LeftShift) and 2 or 1
+	local up = 0
+	if UIS:IsKeyDown(Enum.KeyCode.Space) or vertUp then up = up + 1 end
+	if UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.Q) or vertDown then up = up - 1 end
+
+	yaw = yaw - turn * dt * 1.8
+	local heading = CFrame.Angles(0, yaw, 0)
+	local target = heading.LookVector * fwd * speed * boost + Vector3.new(0, up * speed * 0.6, 0)
+	vel = vel:Lerp(target, math.clamp(dt * 2.5, 0, 1))
+	pos = pos + vel * dt
+
+	-- не проваливаться в землю
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.FilterDescendantsInstances = { ship, char }
+	local hit = Workspace:Raycast(pos + Vector3.new(0, 3, 0), Vector3.new(0, -9, 0), rp)
+	if hit then
+		local minY = hit.Position.Y + 2.1
+		if pos.Y < minY then
+			pos = Vector3.new(pos.X, minY, pos.Z)
+			if vel.Y < 0 then vel = Vector3.new(vel.X, 0, vel.Z) end
+		end
+	end
+
+	local tp = -math.clamp(fwd, -1, 1) * 0.14
+	local tr = -math.clamp(turn, -1, 1) * 0.3
+	local k = math.min(dt * 4, 1)
+	pitch = pitch + (tp - pitch) * k
+	roll = roll + (tr - roll) * k
+
+	local bob = math.sin(t * 2) * 0.12
+	root.CFrame = CFrame.new(pos + Vector3.new(0, bob, 0)) * heading * CFrame.Angles(pitch, 0, roll)
+
+	hrp.CFrame = root.CFrame * seatRel
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	if not hum.Sit then hum.Sit = true end
+end))
+
+---------------------------------------------------------------------
+-- Интерфейс
+---------------------------------------------------------------------
+local function mkBtn(parent, text, cb)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(1, 0, 0, 32)
+	b.BackgroundColor3 = Color3.fromRGB(40, 46, 56)
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 14
+	b.Text = text
+	b.Parent = parent
+	Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+	b.MouseButton1Click:Connect(cb)
+	return b
+end
+
+local function buildGui()
+	gui = Instance.new("ScreenGui")
+	gui.Name = "SaucerXUI"
+	gui.ResetOnSpawn = false
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	local parentOk = pcall(function()
+		gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+	end)
+	if not parentOk or not gui.Parent then gui.Parent = lp:WaitForChild("PlayerGui") end
+
+	local frame = Instance.new("Frame")
+	frame.Size = UDim2.new(0, 176, 0, 0)
+	frame.AutomaticSize = Enum.AutomaticSize.Y
+	frame.Position = UDim2.new(0, 10, 0.5, -170)
+	frame.BackgroundColor3 = Color3.fromRGB(16, 20, 28)
+	frame.BackgroundTransparency = 0.1
+	frame.Active = true
+	frame.Draggable = true
+	frame.Parent = gui
+	Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+	local stroke = Instance.new("UIStroke", frame)
+	stroke.Color = Color3.fromRGB(255, 166, 30)
+	stroke.Thickness = 1.5
+	local pad = Instance.new("UIPadding", frame)
+	pad.PaddingTop = UDim.new(0, 8); pad.PaddingBottom = UDim.new(0, 8)
+	pad.PaddingLeft = UDim.new(0, 8); pad.PaddingRight = UDim.new(0, 8)
+	local lay = Instance.new("UIListLayout", frame)
+	lay.Padding = UDim.new(0, 6)
+	lay.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local title = mkBtn(frame, "SAUCER-X  ▾", function() end)
+	title.BackgroundColor3 = Color3.fromRGB(255, 166, 30)
+	title.TextColor3 = Color3.fromRGB(20, 20, 20)
+	title.LayoutOrder = 0
+
+	local body = Instance.new("Frame")
+	body.Size = UDim2.new(1, 0, 0, 0)
+	body.AutomaticSize = Enum.AutomaticSize.Y
+	body.BackgroundTransparency = 1
+	body.LayoutOrder = 1
+	body.Parent = frame
+	local bl = Instance.new("UIListLayout", body)
+	bl.Padding = UDim.new(0, 6)
+
+	title.MouseButton1Click:Connect(function()
+		body.Visible = not body.Visible
+		title.Text = body.Visible and "SAUCER-X  ▾" or "SAUCER-X  ▸"
+	end)
+
+	mkBtn(body, "Создать тарелку", spawnShip)
+	mkBtn(body, "Убрать тарелку", function() destroyShip(); say("Тарелка удалена") end)
+	seatBtn = mkBtn(body, "Сесть (G)", function()
+		if state.seated then exitShip() else enterShip() end
+	end)
+	mkBtn(body, "Двери (Z)", function() if ship then setGroup("doors", not state.doors) end end)
+	mkBtn(body, "Капот (X)", function() if ship then setGroup("hood", not state.hood) end end)
+	mkBtn(body, "Багажник (C)", function() if ship then setGroup("trunk", not state.trunk) end end)
+	mkBtn(body, "Свет (L)", function() setLights(not state.lights) end)
+	speedBtn = mkBtn(body, "Скорость: " .. speed .. "  +", function()
+		speed = math.min(speed + 20, 260)
+		speedBtn.Text = "Скорость: " .. speed .. "  +"
+	end)
+	mkBtn(body, "Скорость  −", function()
+		speed = math.max(speed - 20, 20)
+		speedBtn.Text = "Скорость: " .. speed .. "  +"
+	end)
+
+	statusLabel = Instance.new("TextLabel")
+	statusLabel.Size = UDim2.new(1, 0, 0, 44)
+	statusLabel.BackgroundTransparency = 1
+	statusLabel.TextColor3 = Color3.fromRGB(190, 200, 215)
+	statusLabel.Font = Enum.Font.Gotham
+	statusLabel.TextSize = 12
+	statusLabel.TextWrapped = true
+	statusLabel.Text = "Нажми «Создать тарелку»"
+	statusLabel.Parent = body
+
+	-- кнопки вверх / вниз (видны только в полёте)
+	fly = Instance.new("Frame")
+	fly.Size = UDim2.new(0, 70, 0, 150)
+	fly.Position = UDim2.new(1, -90, 1, -240)
+	fly.BackgroundTransparency = 1
+	fly.Visible = false
+	fly.Parent = gui
+
+	local function holdBtn(text, y, setter)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(1, 0, 0, 70)
+		b.Position = UDim2.new(0, 0, 0, y)
+		b.BackgroundColor3 = Color3.fromRGB(16, 20, 28)
+		b.BackgroundTransparency = 0.2
+		b.TextColor3 = Color3.fromRGB(255, 166, 30)
+		b.Font = Enum.Font.GothamBold
+		b.TextSize = 28
+		b.Text = text
+		b.Parent = fly
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 14)
+		b.InputBegan:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then setter(true) end
+		end)
+		b.InputEnded:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then setter(false) end
+		end)
+	end
+	holdBtn("▲", 0, function(v) vertUp = v end)
+	holdBtn("▼", 80, function(v) vertDown = v end)
+end
+
+buildGui()
+
+table.insert(connections, UIS.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	local k = input.KeyCode
+	if k == Enum.KeyCode.G then
+		if state.seated then exitShip() else enterShip() end
+	elseif k == Enum.KeyCode.Z and ship then setGroup("doors", not state.doors)
+	elseif k == Enum.KeyCode.X and ship then setGroup("hood", not state.hood)
+	elseif k == Enum.KeyCode.C and ship then setGroup("trunk", not state.trunk)
+	elseif k == Enum.KeyCode.L then setLights(not state.lights)
+	end
+end))
+
+env.__SaucerX = function()
+	for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+	pcall(destroyShip)
+	if gui then gui:Destroy() end
+end
+
+spawnShip()
